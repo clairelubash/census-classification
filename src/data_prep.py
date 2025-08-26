@@ -1,7 +1,11 @@
-import pandas as pd
-import numpy as np
 from pathlib import Path
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from typing import Tuple
+import logging
+
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import OneHotEncoder
+
 
 # -------------------------------
 # Config
@@ -10,6 +14,11 @@ DATA_PATH = Path('data')
 TRAIN_FILE = DATA_PATH / 'train.csv'
 TEST_FILE = DATA_PATH / 'test.csv'
 
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s', 
+    level=logging.INFO
+)
+
 NAN_REPLACEMENTS = [' ?', ' NA', ' Do not know']
 NAN_STARTSWITH = ' Not in universe'
 
@@ -17,7 +26,7 @@ DROP_COLS = ['year', 'veterans_benefits']
 
 BINARY_MAPS = {
     'sex': {' Male': 1, ' Female': 0},
-    'label': {' 50000+.': 1, ' - 50000.': 0}
+    'label': {' 50000+.': 1, ' - 50000.': 0},
 }
 
 ONE_HOT_FEATURES = [
@@ -32,12 +41,9 @@ ONE_HOT_FEATURES = [
     'country_of_birth_father',
     'country_of_birth_mother',
     'country_of_birth_self',
-    'detailed_household_and_family_stat'
+    'detailed_household_and_family_stat',
 ]
 
-# -------------------------------
-# Custom Groupings
-# -------------------------------
 EDUCATION_GROUPS = {
     ' No schooling': 'No schooling',
     ' Less than 1st grade': 'No schooling',
@@ -56,54 +62,68 @@ EDUCATION_GROUPS = {
     ' Masters degree(MA MS MEng MEd MSW MBA)': 'Masters',
     ' Prof school degree (MD DDS DVM LLB JD)': 'Professional',
     ' Doctorate degree(PhD EdD)': 'Doctorate',
-    ' Children': 'Other'
+    ' Children': 'Other',
 }
 
+
+# -------------------------------
+# Helper Functions
+# -------------------------------
 def group_household(val: str) -> str:
+    '''Group household and family relationship values into broader categories.'''
     val = val.strip()
     if 'Householder' in val:
         return 'Householder'
-    elif 'Spouse' in val:
+    if 'Spouse' in val:
         return 'Spouse'
-    elif 'Child' in val or 'Grandchild' in val:
+    if 'Child' in val or 'Grandchild' in val:
         return 'Child/Grandchild'
-    elif 'Other Rel' in val:
+    if 'Other Rel' in val:
         return 'Other relative'
-    elif 'Secondary individual' in val or 'Nonfamily' in val:
+    if 'Secondary individual' in val or 'Nonfamily' in val:
         return 'Nonfamily'
-    elif 'group quarters' in val:
+    if 'group quarters' in val:
         return 'Group quarters'
-    else:
-        return 'Other'
+    return 'Other'
 
-# -------------------------------
-# Data Preparation Functions
-# -------------------------------
-def load_data(train_file: Path, test_file: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    train = pd.read_csv(train_file)
-    test = pd.read_csv(test_file)
-    return train, test
+
+def load_data(train_file: Path, test_file: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    '''Load raw train and test CSV files.'''
+    return pd.read_csv(train_file), pd.read_csv(test_file)
+
 
 def replace_with_nan(df: pd.DataFrame) -> pd.DataFrame:
+    '''Replace placeholder strings with NaN values.'''
     df = df.replace(NAN_REPLACEMENTS, np.nan)
     for col in df.select_dtypes(include='object').columns:
-        df[col] = df[col].map(lambda x: np.nan if isinstance(x, str) and x.startswith(NAN_STARTSWITH) else x)
+        df[col] = df[col].map(
+            lambda x: np.nan if isinstance(x, str) and x.startswith(NAN_STARTSWITH) else x
+        )
     return df
 
+
 def drop_high_nan_cols(df: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
+    '''Drop columns with proportion of NaN values above threshold.'''
     return df.loc[:, df.isnull().mean() <= threshold]
 
+
 def encode_binary(df: pd.DataFrame, col: str, mapping: dict) -> pd.DataFrame:
+    '''Encode binary categorical columns using a mapping dictionary.'''
     df[col] = df[col].map(mapping)
     return df
 
-def preprocess(train: pd.DataFrame, test: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
-    # Replace with NaN
+# -------------------------------
+# Preprocessing Pipeline
+# -------------------------------
+def preprocess(train: pd.DataFrame, test: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    '''Full preprocessing pipeline for train and test datasets.'''
+
+    # Replace placeholder values with NaN
     train = replace_with_nan(train)
     test = replace_with_nan(test)
 
-    # Drop high-NaN cols
+    # Drop high-NaN columns (apply train mask to test)
     train = drop_high_nan_cols(train)
     test = test[train.columns]
 
@@ -118,10 +138,14 @@ def preprocess(train: pd.DataFrame, test: pd.DataFrame) -> tuple[pd.DataFrame, p
     test['education'] = test['education'].map(EDUCATION_GROUPS)
 
     # Household grouping
-    train['detailed_household_and_family_stat'] = train['detailed_household_and_family_stat'].map(group_household)
-    test['detailed_household_and_family_stat'] = test['detailed_household_and_family_stat'].map(group_household)
+    train['detailed_household_and_family_stat'] = train[
+        'detailed_household_and_family_stat'
+    ].map(group_household)
+    test['detailed_household_and_family_stat'] = test[
+        'detailed_household_and_family_stat'
+    ].map(group_household)
 
-    # Impute hispanic_origin NaN with 'All other'
+    # Fill NaN for specific categorical
     train['hispanic_origin'] = train['hispanic_origin'].fillna(' All other')
     test['hispanic_origin'] = test['hispanic_origin'].fillna(' All other')
 
@@ -130,38 +154,43 @@ def preprocess(train: pd.DataFrame, test: pd.DataFrame) -> tuple[pd.DataFrame, p
     train_ohe = pd.DataFrame(
         ohe.fit_transform(train[ONE_HOT_FEATURES]),
         columns=ohe.get_feature_names_out(ONE_HOT_FEATURES),
-        index=train.index
+        index=train.index,
     )
-
     test_ohe = pd.DataFrame(
         ohe.transform(test[ONE_HOT_FEATURES]),
         columns=ohe.get_feature_names_out(ONE_HOT_FEATURES),
-        index=test.index
+        index=test.index,
     )
 
-    # Drop original categorical cols & concat OHE
     train = train.drop(columns=ONE_HOT_FEATURES).join(train_ohe)
     test = test.drop(columns=ONE_HOT_FEATURES).join(test_ohe)
 
-    # Drop unnecessary columns based on EDA
+    # Drop unnecessary columns
     train = train.drop(columns=DROP_COLS)
     test = test.drop(columns=DROP_COLS)
 
+    # Fill any remaining missing values
     train = train.fillna('unknown')
     test = test.fillna('unknown')
 
     return train, test
 
+
 # -------------------------------
-# Main
+# Main Execution
 # -------------------------------
-if __name__ == '__main__':
+def main() -> None:
+    '''Run preprocessing and save cleaned datasets.'''
     train_df, test_df = load_data(TRAIN_FILE, TEST_FILE)
     train_clean, test_clean = preprocess(train_df, test_df)
 
-    print('Training data shape:', train_clean.shape)
-    print('Testing data shape:', test_clean.shape)
+    logging.info(f'Training data shape: {train_clean.shape}')
+    logging.info(f'Testing data shape: {test_clean.shape}')
 
-    # Save cleaned versions
     train_clean.to_csv(DATA_PATH / 'train_clean.csv', index=False)
     test_clean.to_csv(DATA_PATH / 'test_clean.csv', index=False)
+
+
+if __name__ == '__main__':
+    main()
+

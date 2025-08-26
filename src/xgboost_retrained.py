@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 import pandas as pd
 import numpy as np
 import shap
@@ -14,89 +15,132 @@ from model_pipeline import (
     save_shap_plot
 )
 
+
 # -------------------------------
-# Setup paths
+# Configuration
 # -------------------------------
 OUTPUT_DIR = Path('outputs')
 DATA_DIR = Path('data')
-train_suffix = 'train_clean.csv'
-test_suffix = 'test_clean.csv'
+TRAIN_SUFFIX = 'train_clean.csv'
+TEST_SUFFIX = 'test_clean.csv'
 
-# -------------------------------
-# Load Data
-# -------------------------------
-X_train, y_train, X_test, y_test = load_data(DATA_DIR, train_suffix, test_suffix)
-
-# -------------------------------
-# Hyperparameter Tuning for XGBoost
-# -------------------------------
-xgb = XGBClassifier(
-    eval_metric='logloss',
-    scale_pos_weight=get_scale_pos_weight(y_train),
-    random_state=42,
-    n_jobs=1
-)
-
-param_grid = {
+PARAM_GRID = {
     'n_estimators': [100, 200, 300],
     'max_depth': [3, 5, 7],
     'learning_rate': [0.01, 0.05, 0.1],
     'subsample': [0.7, 0.8, 1.0],
-    'colsample_bytree': [0.7, 0.8, 1.0]
+    'colsample_bytree': [0.7, 0.8, 1.0],
 }
 
-search = RandomizedSearchCV(
-    estimator=xgb,
-    param_distributions=param_grid,
-    n_iter=20,
-    scoring='roc_auc',
-    cv=3,
-    verbose=1,
-    n_jobs=-1,
-    random_state=42
+N_ITER_SEARCH = 20
+RANDOM_STATE = 42
+
+
+# -------------------------------
+# Logging Setup
+# -------------------------------
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s', 
+    level=logging.INFO
 )
 
-print('\nStarting hyperparameter tuning for XGBoost...')
-search.fit(X_train, y_train)
-best_xgb = search.best_estimator_
-print(f'Best parameters: {search.best_params_}')
 
-# -------------------------------
-# Initial Evaluation
-# -------------------------------
-# y_pred = best_xgb.predict(X_test)
-# y_pred_proba = best_xgb.predict_proba(X_test)[:, 1]
-# evaluate_model('XGBoost_Tuned', y_test, y_pred, y_pred_proba, OUTPUT_DIR / 'xgb_tuned')
+def get_xgb_model(y_train):
+    '''Initialize an XGBoost model with class imbalance handling.'''
+    return XGBClassifier(
+        eval_metric='logloss',
+        scale_pos_weight=get_scale_pos_weight(y_train),
+        random_state=RANDOM_STATE,
+        n_jobs=1,
+    )
 
-# -------------------------------
-# SHAP Feature Selection
-# -------------------------------
-print('\nComputing SHAP values for feature selection...')
-explainer = shap.Explainer(best_xgb, X_train)
-shap_values = explainer(X_train)
 
-# Calculate mean absolute SHAP values
-shap_importances = np.abs(shap_values.values).mean(axis=0)
-feature_importances = pd.Series(shap_importances, index=X_train.columns)
-selected_features = feature_importances[feature_importances > 0.01].index 
+def tune_hyperparameters(model, X_train, y_train):
+    '''Perform hyperparameter tuning with RandomizedSearchCV.'''
+    logging.info('Starting hyperparameter tuning for XGBoost...')
+    search = RandomizedSearchCV(
+        estimator=model,
+        param_distributions=PARAM_GRID,
+        n_iter=N_ITER_SEARCH,
+        scoring='roc_auc',
+        cv=3,
+        verbose=1,
+        n_jobs=-1,
+        random_state=RANDOM_STATE,
+    )
+    search.fit(X_train, y_train)
+    logging.info(f'Best parameters: {search.best_params_}')
+    return search.best_estimator_
 
-# -------------------------------
-# Retrain XGBoost on Selected Features
-# -------------------------------
-print('\nRetraining XGBoost with selected features...')
-best_xgb.fit(X_train[selected_features], y_train)
 
-y_pred_sel = best_xgb.predict(X_test[selected_features])
-y_pred_proba_sel = best_xgb.predict_proba(X_test[selected_features])[:, 1]
+def compute_shap_feature_importance(model, X_train, threshold=0.01):
+    '''Compute SHAP values and select important features above a threshold.'''
+    logging.info('Computing SHAP values for feature selection...')
+    explainer = shap.Explainer(model, X_train)
+    shap_values = explainer(X_train)
 
-evaluate_model('XGBoost_SelectedFeatures', y_test, y_pred_sel, y_pred_proba_sel, OUTPUT_DIR / 'xgb_selected')
+    shap_importances = np.abs(shap_values.values).mean(axis=0)
+    feature_importances = pd.Series(shap_importances, index=X_train.columns)
 
-# SHAP summary plot for final model
-save_shap_plot(explainer(X_test[selected_features]), X_test[selected_features], X_train, 'xgboost', 'xgb_selected_shap_summary.png', 'summary')
+    selected_features = feature_importances[feature_importances > threshold].index
+    logging.info(f'Selected {len(selected_features)} features using SHAP.')
+    return explainer, selected_features
 
-# # SHAP summary plot for final model
-# plt.figure()
-# shap.summary_plot(explainer(X_test[selected_features]), X_test[selected_features], show=False)
-# plt.tight_layout()
-# plt.savefig(OUTPUT_DIR / 'xgb_selected_shap_summary.png')
-# plt.close()
+
+def retrain_with_selected_features(model, explainer, X_train, y_train, X_test, y_test, selected_features):
+    '''Retrain XGBoost with SHAP-selected features and evaluate.'''
+    logging.info('Retraining XGBoost with selected features...')
+    model.fit(X_train[selected_features], y_train)
+
+    y_pred = model.predict(X_test[selected_features])
+    y_pred_proba = model.predict_proba(X_test[selected_features])[:, 1]
+
+    evaluate_model(
+        'XGBoost_SelectedFeatures',
+        y_test,
+        y_pred,
+        y_pred_proba,
+        OUTPUT_DIR / 'xgb_selected',
+    )
+
+    # Save SHAP summary plots
+    shap_values = explainer(X_test[selected_features])
+    save_shap_plot(
+        shap_values,
+        X_test[selected_features],
+        X_train,
+        'xgboost',
+        'xgb_selected_shap_summary.png',
+        'summary',
+    )
+
+    plt.figure()
+    shap.summary_plot(shap_values, X_test[selected_features], show=False)
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / 'xgb_selected_shap_summary.png')
+    plt.close()
+
+
+def main():
+    '''Main retraining pipeline.'''
+    # Load data
+    X_train, y_train, X_test, y_test = load_data(DATA_DIR, TRAIN_SUFFIX, TEST_SUFFIX)
+
+    # Initial training & tuning
+    xgb_model = get_xgb_model(y_train)
+    best_xgb = tune_hyperparameters(xgb_model, X_train, y_train)
+
+    # Initial evaluation
+    y_pred = best_xgb.predict(X_test)
+    y_pred_proba = best_xgb.predict_proba(X_test)[:, 1]
+    evaluate_model('XGBoost_Tuned', y_test, y_pred, y_pred_proba, OUTPUT_DIR / 'xgb_tuned')
+
+    # SHAP feature selection
+    explainer, selected_features = compute_shap_feature_importance(best_xgb, X_train)
+
+    # Retrain with selected features
+    retrain_with_selected_features(best_xgb, explainer, X_train, y_train, X_test, y_test, selected_features)
+
+
+if __name__ == '__main__':
+    main()
